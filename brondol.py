@@ -1,6 +1,6 @@
 import cv2
 from src.services.SerialService import SerialService
-from src.vision.brondol import BrondolDetector  # pastikan path sesuai
+from src.vision.brondol import BrondolDetector  
 
 # ===== CONFIG =====
 MODEL_PATH = "src/models/brondol_ncnn_model"
