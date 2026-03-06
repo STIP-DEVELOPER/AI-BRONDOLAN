@@ -9,16 +9,13 @@ from src.services.SerialService import SerialService
 from src.services.DetectionLogService import DetectionLogService
 from src.services.DetectionCsvService import DetectionCsvService
 
-# Muat variabel dari file .env (jika ada)
 load_dotenv()
 
-# ===== CONFIG =====
 MODEL_PATH_BRONDOL = "src/models/brondol_ncnn_model"
 
 SERIAL_PORT = "/dev/ttyUSB0"  # mac: /dev/tty.usbserial-xxxx
 BAUDRATE = 9600
 
-# Konfigurasi MySQL, diambil dari .env dengan default aman
 MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
 MYSQL_PORT = int(os.getenv("MYSQL_PORT", "8889"))
 MYSQL_USER = os.getenv("MYSQL_USER", "root")
@@ -32,14 +29,14 @@ serial_service = None
 # serial_service = SerialService(SERIAL_PORT, BAUDRATE)
 # serial_service.connect()
 
-detection_log_service = DetectionLogService(
-    host=MYSQL_HOST,
-    port=MYSQL_PORT,
-    user=MYSQL_USER,
-    password=MYSQL_PASSWORD,
-    database=MYSQL_DATABASE,
-)
-detection_log_service.connect()
+# detection_log_service = DetectionLogService(
+#     host=MYSQL_HOST,
+#     port=MYSQL_PORT,
+#     user=MYSQL_USER,
+#     password=MYSQL_PASSWORD,
+#     database=MYSQL_DATABASE,
+# )
+# detection_log_service.connect()
 
 csv_log_service = DetectionCsvService(file_path="logs/detections.csv")
 
@@ -73,7 +70,7 @@ try:
         # Setiap ~1 detik, simpan ke database & CSV (jika ada objek)
         now = time.time()
         if now - last_log_time >= 1.0 and total_objects > 0:
-            detection_log_service.insert_detection(total_objects=total_objects)
+            # detection_log_service.insert_detection(total_objects=total_objects)
             csv_log_service.log_detection(total_objects=total_objects)
             last_log_time = now
 
@@ -95,5 +92,5 @@ finally:
     cap.release()
     if serial_service is not None:
         serial_service.close()
-    detection_log_service.close()
+    # detection_log_service.close()
     cv2.destroyAllWindows()
