@@ -1,11 +1,16 @@
+import os
 import time
 
 import cv2
+from dotenv import load_dotenv
 from src.vision.brondol import BrondolDetector
 
 from src.services.SerialService import SerialService
 from src.services.DetectionLogService import DetectionLogService
 from src.services.DetectionCsvService import DetectionCsvService
+
+# Muat variabel dari file .env (jika ada)
+load_dotenv()
 
 # ===== CONFIG =====
 MODEL_PATH_BRONDOL = "src/models/brondol_ncnn_model"
@@ -13,12 +18,12 @@ MODEL_PATH_BRONDOL = "src/models/brondol_ncnn_model"
 SERIAL_PORT = "/dev/ttyUSB0"  # mac: /dev/tty.usbserial-xxxx
 BAUDRATE = 9600
 
-# Konfigurasi MySQL, silakan sesuaikan dengan environment Anda
-MYSQL_HOST = "localhost"
-MYSQL_PORT = 8889
-MYSQL_USER = "root"
-MYSQL_PASSWORD = "root"
-MYSQL_DATABASE = "brondol_db"
+# Konfigurasi MySQL, diambil dari .env dengan default aman
+MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
+MYSQL_PORT = int(os.getenv("MYSQL_PORT", "8889"))
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "root")
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "brondol_db")
 # ==================
 
 brondol_detector = BrondolDetector(MODEL_PATH_BRONDOL)
