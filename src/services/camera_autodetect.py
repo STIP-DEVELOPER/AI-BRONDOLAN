@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+from itertools import combinations
 from pathlib import Path
 
 import cv2
@@ -14,6 +15,10 @@ from src.config.performance import (
 
 _PROBE_RETRIES = 2
 
+# V4L2 capability flags (linux/videodev2.h)
+_V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+_V4L2_CAP_META_CAPTURE = 0x00800000
+
 
 def is_linux() -> bool:
     return sys.platform.startswith("linux")
@@ -25,6 +30,13 @@ def capture_backend() -> int:
     if is_linux():
         return cv2.CAP_V4L2
     return cv2.CAP_ANY
+
+
+def _suppress_opencv_probe_noise() -> None:
+    try:
+        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
+    except AttributeError:
+        pass
 
 
 def _probe_settle_delay() -> None:
@@ -40,29 +52,120 @@ def _device_path(index: int) -> str | None:
     return None
 
 
-def open_video_capture(index: int) -> cv2.VideoCapture:
-    """Buka kamera by index; di Linux pakai path /dev/videoN + V4L2."""
-    backend = capture_backend()
-    path = _device_path(index)
-    if path is not None:
-        return cv2.VideoCapture(path, backend)
-    return cv2.VideoCapture(index, backend)
+def _read_sysfs_caps(index: int) -> int | None:
+    """Baca device_caps / capabilities dari sysfs (Linux 4.16+)."""
+    base = Path(f"/sys/class/video4linux/video{index}")
+    for name in ("device_caps", "capabilities"):
+        cap_file = base / name
+        if not cap_file.is_file():
+            continue
+        try:
+            return int(cap_file.read_text().strip(), 16)
+        except (OSError, ValueError):
+            continue
+    return None
 
 
-def _read_test_frame(cap: cv2.VideoCapture) -> bool:
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    for _ in range(3):
-        ret, frame = cap.read()
-        if ret and frame is not None and frame.size > 0:
+def _linux_sysfs_has_device_caps() -> bool:
+    """True jika kernel mengekspos device_caps (banyak laptop lama tidak)."""
+    sys_dir = Path("/sys/class/video4linux")
+    if not sys_dir.is_dir():
+        return False
+    for entry in sys_dir.glob("video*"):
+        if (entry / "device_caps").is_file() or (entry / "capabilities").is_file():
             return True
-        time.sleep(0.05)
     return False
 
 
+def _linux_heuristic_capture_indices(all_indices: list[int]) -> list[int]:
+    """
+    Tanpa device_caps di sysfs: UVC ganda biasanya capture di index genap.
+
+    Contoh 2 kamera USB: /dev/video0,1,2,3 -> pakai 0 dan 2 (bukan 1 dan 3).
+    """
+    if not all_indices:
+        return []
+
+    evens = [i for i in all_indices if i % 2 == 0]
+    # Pola klasik dua kamera: 0,1,2,3
+    if len(all_indices) >= 4 and len(evens) >= 2:
+        return evens
+    if len(all_indices) == 2 and evens:
+        return evens
+    return all_indices
+
+
+def _linux_device_name(index: int) -> str:
+    name_file = Path(f"/sys/class/video4linux/video{index}/name")
+    if name_file.is_file():
+        try:
+            return name_file.read_text().strip()
+        except OSError:
+            pass
+    return f"video{index}"
+
+
+def is_v4l2_capture_node(index: int) -> bool:
+    """
+    True jika node ini bisa capture video (bukan metadata saja).
+
+    Di Linux, satu kamera USB sering punya /dev/video0 (capture) dan
+    /dev/video1 (metadata) — membuka video1 menghasilkan warning OpenCV.
+    """
+    if not is_linux():
+        return True
+
+    base = Path(f"/sys/class/video4linux/video{index}")
+    if not base.exists():
+        return False
+
+    caps = _read_sysfs_caps(index)
+    if caps is None:
+        if not _linux_sysfs_has_device_caps():
+            all_idx = _linux_video_indices(MAX_CAMERA_PROBE)
+            guessed = _linux_heuristic_capture_indices(all_idx)
+            if guessed:
+                return index in guessed
+        return _device_path(index) is not None
+
+    has_capture = bool(caps & _V4L2_CAP_VIDEO_CAPTURE)
+    meta_only = bool(caps & _V4L2_CAP_META_CAPTURE) and not has_capture
+    return has_capture and not meta_only
+
+
+def _linux_capture_indices(max_probe: int) -> list[int]:
+    """Index /dev/video* yang dipakai untuk capture (sysfs atau heuristik genap)."""
+    all_idx = _linux_video_indices(max_probe)
+    if not all_idx:
+        return []
+
+    if not _linux_sysfs_has_device_caps():
+        guessed = _linux_heuristic_capture_indices(all_idx)
+        if guessed:
+            return guessed
+
+    indices: list[int] = []
+    sys_dir = Path("/sys/class/video4linux")
+    if not sys_dir.is_dir():
+        return _linux_heuristic_capture_indices(all_idx)
+
+    for entry in sorted(sys_dir.glob("video*")):
+        suffix = entry.name[5:]
+        if not suffix.isdigit():
+            continue
+        idx = int(suffix)
+        if idx >= max_probe:
+            continue
+        if not _device_path(idx):
+            continue
+        if is_v4l2_capture_node(idx):
+            indices.append(idx)
+
+    return sorted(set(indices)) or _linux_heuristic_capture_indices(all_idx)
+
+
 def _linux_video_indices(max_probe: int) -> list[int]:
-    """Index dari /dev/video* (Linux Mint, V4L2)."""
+    """Semua /dev/video* (termasuk metadata) — fallback jika sysfs kosong."""
     indices: list[int] = []
     for path in sorted(Path("/dev").glob("video*")):
         suffix = path.name[5:]
@@ -73,30 +176,72 @@ def _linux_video_indices(max_probe: int) -> list[int]:
     return sorted(set(indices))
 
 
+def _log_linux_capture_nodes(candidates: list[int]) -> None:
+    if not is_linux() or not candidates:
+        return
+    parts = [
+        f"/dev/video{i} ({_linux_device_name(i)})" for i in candidates
+    ]
+    print(f"[CAMERA] Node capture V4L2: {', '.join(parts)}")
+
+
+def open_video_capture(index: int) -> cv2.VideoCapture:
+    """Buka kamera; di Linux coba index numerik lalu path /dev/videoN."""
+    backend = capture_backend()
+    if is_linux():
+        path = _device_path(index)
+        for source in (index, path):
+            if source is None:
+                continue
+            cap = cv2.VideoCapture(source, backend)
+            if cap.isOpened():
+                return cap
+            cap.release()
+        return cv2.VideoCapture(index, backend)
+
+    path = _device_path(index)
+    if path is not None:
+        return cv2.VideoCapture(path, backend)
+    return cv2.VideoCapture(index, backend)
+
+
+def _read_test_frame(cap: cv2.VideoCapture) -> bool:
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    for _ in range(5):
+        ret, frame = cap.read()
+        if ret and frame is not None and frame.size > 0:
+            return True
+        time.sleep(0.08)
+    return False
+
+
 def _probe_order(max_probe: int) -> list[int]:
     """
-    Urutan scan: di Linux utamakan index 0 dan 1 (/dev/video0, /dev/video1).
-    """
+  Urutan scan kamera.
+
+  Linux: hanya node capture (biasanya video0 + video2 untuk 2 kamera USB).
+  """
     if is_linux():
+        capture = _linux_capture_indices(max_probe)
+        if capture:
+            _log_linux_capture_nodes(capture)
+            return capture
+
+        # Fallback jika sysfs tidak tersedia
         on_disk = _linux_video_indices(max_probe)
-        order: list[int] = []
-        for idx in (0, 1):
-            if idx < max_probe and (idx in on_disk or not on_disk):
-                order.append(idx)
-        for idx in on_disk:
-            if idx not in order:
-                order.append(idx)
-        for idx in range(max_probe):
-            if idx not in order:
-                order.append(idx)
-        return order
+        return on_disk if on_disk else list(range(max_probe))
 
     return list(range(max_probe))
 
 
 def probe_camera(index: int) -> bool:
     """Cek apakah index kamera bisa dibuka dan membaca frame."""
-    for attempt in range(_PROBE_RETRIES):
+    if is_linux() and not is_v4l2_capture_node(index):
+        return False
+
+    for _attempt in range(_PROBE_RETRIES):
         cap = open_video_capture(index)
         try:
             if not cap.isOpened():
@@ -116,6 +261,8 @@ def _probe_pair_simultaneous(index_a: int, index_b: int) -> bool:
         cap_a.release()
         return False
 
+    _probe_settle_delay()
+
     cap_b = open_video_capture(index_b)
     if not cap_b.isOpened():
         cap_a.release()
@@ -129,29 +276,40 @@ def _probe_pair_simultaneous(index_a: int, index_b: int) -> bool:
     return ok
 
 
-def _ensure_dual_pair(found: list[int], max_probe: int) -> list[int]:
-    if len(found) >= 2:
-        return found
+def _find_dual_pair(
+    found: list[int],
+    candidates: list[int],
+    max_probe: int,
+) -> list[int]:
+    """Cari dua index yang bisa dibuka bersamaan."""
+    found_set = set(found)
+    if len(found_set) >= 2:
+        return sorted(found_set)
 
-    if is_linux() and 0 not in found and _device_path(0):
-        if probe_camera(0):
-            found.append(0)
-    if is_linux() and 1 not in found and _device_path(1):
-        if probe_camera(1):
-            found.append(1)
+    # Pasangan yang sudah ketemu satu sisi
+    pool = sorted(set(candidates) | found_set)
+    if not pool and is_linux():
+        pool = _linux_capture_indices(max_probe) or _linux_video_indices(max_probe)
+    if not pool:
+        pool = list(range(max_probe))
 
-    found = sorted(set(found))
-    if len(found) >= 2:
-        return found
+    # Utamakan (0, 2) — pola 2 kamera USB di Linux Mint tanpa device_caps
+    preferred: list[tuple[int, int]] = []
+    if is_linux() and 0 in pool and 2 in pool:
+        preferred.append((0, 2))
+    if len(pool) >= 2:
+        preferred.append((pool[0], pool[1]))
+    for pair in combinations(pool, 2):
+        if pair not in preferred:
+            preferred.append(pair)
 
-    for i in range(max_probe):
-        for j in range(i + 1, max_probe):
-            if i in found and j in found:
-                continue
-            if _probe_pair_simultaneous(i, j):
-                return sorted(set(found) | {i, j})
+    for index_a, index_b in preferred:
+        if index_a in found_set and index_b in found_set:
+            return sorted(found_set)
+        if _probe_pair_simultaneous(index_a, index_b):
+            return sorted(found_set | {index_a, index_b})
 
-    return sorted(set(found))
+    return sorted(found_set)
 
 
 def list_available_cameras(
@@ -162,15 +320,18 @@ def list_available_cameras(
     Scan index kamera yang aktif.
 
     held_indices: index yang sedang dipakai — jangan di-probe ulang
-    (macOS/Linux: membuka device yang sama saat sudah terbuka sering gagal).
+    (membuka device yang sama saat sudah terbuka sering gagal).
     """
+    _suppress_opencv_probe_noise()
+
     if max_probe is None:
         max_probe = MAX_CAMERA_PROBE
 
     held = set(held_indices or [])
+    order = _probe_order(max_probe)
     found: list[int] = []
 
-    for index in _probe_order(max_probe):
+    for index in order:
         if index in held:
             found.append(index)
             continue
@@ -178,7 +339,37 @@ def list_available_cameras(
             found.append(index)
         _probe_settle_delay()
 
-    return _ensure_dual_pair(found, max_probe)
+    found = sorted(set(found))
+    result = _find_dual_pair(found, order, max_probe)
+
+    if is_linux() and len(result) < 2:
+        all_nodes = _linux_video_indices(max_probe)
+        capture_nodes = _linux_capture_indices(max_probe)
+        print(
+            f"[CAMERA] Hanya {len(result)} kamera aktif. "
+            f"/dev/video*: {all_nodes} | dicoba capture: {capture_nodes}"
+        )
+        if not _linux_sysfs_has_device_caps():
+            print(
+                "[CAMERA] Kernel tanpa device_caps — pakai index genap "
+                f"({capture_nodes}). Set .env: CAMERA_NGINTIL=0 CAMERA_BRONDOL=2"
+            )
+        elif len(capture_nodes) >= 2:
+            print(
+                "[CAMERA] Tip: set .env CAMERA_NGINTIL="
+                f"{capture_nodes[0]} CAMERA_BRONDOL={capture_nodes[1]}"
+            )
+
+    return result
+
+
+def get_fixed_camera_indices() -> list[int] | None:
+    """Index dari .env jika NGINTIL dan BRONDOL keduanya diset (skip scan agresif)."""
+    ng = _env_camera_index("ngintil")
+    br = _env_camera_index("brondol")
+    if ng is not None and br is not None and ng != br:
+        return [ng, br]
+    return None
 
 
 def _env_camera_index(role: str) -> int | None:
@@ -198,7 +389,9 @@ def assign_camera_indices(
 ) -> tuple[int | None, int | None]:
     """
     Tetapkan index untuk ngintil (pertama) dan brondol (kedua).
-    Di Linux standar: /dev/video0 -> ngintil, /dev/video1 -> brondol.
+
+    Linux: pakai urutan node capture yang terbukti bisa dibaca
+    (mis. video0 + video2), bukan selalu 0 dan 1.
     """
     if available is None:
         available = list_available_cameras()
@@ -218,16 +411,6 @@ def assign_camera_indices(
         brondol_index = brondol_override
     elif len(available) >= 2:
         brondol_index = available[1]
-
-    if is_linux() and not brondol_override:
-        if 0 in available and 1 in available:
-            ngintil_index = 0
-            brondol_index = 1
-        elif ngintil_index == 0 and 1 in available:
-            brondol_index = 1
-        elif ngintil_index == 1 and 0 in available:
-            ngintil_index = 0
-            brondol_index = 1
 
     if (
         ngintil_index is not None

@@ -41,10 +41,22 @@ INFER_EVERY_N_FRAMES = _env_int("INFER_EVERY_N_FRAMES", 3)
 # Resolusi capture kamera
 CAMERA_WIDTH = _env_int("CAMERA_WIDTH", 424)
 CAMERA_HEIGHT = _env_int("CAMERA_HEIGHT", 240)
-CAMERA_SCAN_INTERVAL_SEC = _env_float("CAMERA_SCAN_INTERVAL_SEC", 5.0)
-CAMERA_SCAN_INTERVAL_CONNECTED_SEC = _env_float("CAMERA_SCAN_INTERVAL_CONNECTED_SEC", 12.0)
-MAX_CAMERA_PROBE = _env_int("MAX_CAMERA_PROBE", 10)
-CAMERA_PROBE_DELAY_SEC = _env_float("CAMERA_PROBE_DELAY_SEC", 0.4)
+
+# USB sibuk (mic + Arduino + 2 kamera di port terbatas): kurangi scan/probe
+CAMERA_USB_BUSY = _env_bool("CAMERA_USB_BUSY", False)
+# Hot-plug: scan ulang berkala. Matikan jika index sudah fix di .env
+CAMERA_HOTPLUG = _env_bool("CAMERA_HOTPLUG", True)
+
+_default_scan = 20.0 if CAMERA_USB_BUSY else 5.0
+_default_scan_ok = 45.0 if CAMERA_USB_BUSY else 12.0
+_default_probe = 0.9 if CAMERA_USB_BUSY else 0.4
+
+CAMERA_SCAN_INTERVAL_SEC = _env_float("CAMERA_SCAN_INTERVAL_SEC", _default_scan)
+CAMERA_SCAN_INTERVAL_CONNECTED_SEC = _env_float(
+    "CAMERA_SCAN_INTERVAL_CONNECTED_SEC", _default_scan_ok
+)
+MAX_CAMERA_PROBE = _env_int("MAX_CAMERA_PROBE", 4)
+CAMERA_PROBE_DELAY_SEC = _env_float("CAMERA_PROBE_DELAY_SEC", _default_probe)
 
 # Batasi kecepatan loop UI (~20 FPS tampilan)
 DISPLAY_WAIT_MS = _env_int("DISPLAY_WAIT_MS", 50)

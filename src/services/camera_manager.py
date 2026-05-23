@@ -7,13 +7,16 @@ import numpy as np
 
 from src.config.performance import (
     CAMERA_HEIGHT,
+    CAMERA_HOTPLUG,
     CAMERA_PROBE_DELAY_SEC,
     CAMERA_SCAN_INTERVAL_CONNECTED_SEC,
     CAMERA_SCAN_INTERVAL_SEC,
+    CAMERA_USB_BUSY,
     CAMERA_WIDTH,
 )
 from src.services.camera_autodetect import (
     assign_camera_indices,
+    get_fixed_camera_indices,
     is_linux,
     list_available_cameras,
     open_video_capture,
@@ -107,6 +110,13 @@ class CameraManager:
         }
 
         self.refresh(force=True)
+        if CAMERA_USB_BUSY or (
+            get_fixed_camera_indices() and not CAMERA_HOTPLUG
+        ):
+            print(
+                "[CAMERA] Mode hemat USB — index dari .env, scan minimal "
+                "(Linux 2 kamera: CAMERA_NGINTIL=0 CAMERA_BRONDOL=2)"
+            )
 
     def _open_capture(self, index: int) -> cv2.VideoCapture | None:
         cap = open_video_capture(index)
@@ -152,6 +162,8 @@ class CameraManager:
 
     def refresh(self, force: bool = False) -> None:
         now = time.time()
+        if not force and not CAMERA_HOTPLUG and self._all_enabled_connected():
+            return
         if not force and now - self._last_scan < self._scan_interval():
             return
 
@@ -163,7 +175,12 @@ class CameraManager:
             and self._caps.get(role) is not None
             and self._caps[role].isOpened()
         ]
-        new_available = list_available_cameras(held_indices=held)
+        fixed = get_fixed_camera_indices()
+        if fixed and (not CAMERA_HOTPLUG or CAMERA_USB_BUSY):
+            # Port USB penuh: jangan scan semua /dev/video*, pakai index .env saja
+            new_available = sorted(set(fixed) | set(held))
+        else:
+            new_available = list_available_cameras(held_indices=held)
         if new_available != self._available or force:
             print(f"[CAMERA] Terdeteksi index: {new_available or 'tidak ada'}")
         ng_idx, br_idx = assign_camera_indices(new_available)
