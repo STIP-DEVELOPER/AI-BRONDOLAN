@@ -69,5 +69,7 @@ UI_ALTERNATE_INFER = _env_bool("UI_ALTERNATE_INFER", True)
 # Resize frame sebelum infer (lebar maks)
 INFER_MAX_FRAME_WIDTH = _env_int("INFER_MAX_FRAME_WIDTH", 424)
 
-# Jendela OpenCV fullscreen saat aplikasi dijalankan
-APP_FULLSCREEN = _env_bool("APP_FULLSCREEN", True)
+# Jendela OpenCV: default windowed saat pertama kali dijalankan
+APP_FULLSCREEN = _env_bool("APP_FULLSCREEN", False)
+UI_WINDOW_WIDTH = _env_int("UI_WINDOW_WIDTH", 1280)
+UI_WINDOW_HEIGHT = _env_int("UI_WINDOW_HEIGHT", 720)

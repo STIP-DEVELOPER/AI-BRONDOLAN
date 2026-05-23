@@ -128,14 +128,25 @@ def get_primary_screen_size() -> tuple[int, int]:
     return 1920, 1080
 
 
+def _default_windowed_size() -> tuple[int, int]:
+    from src.config.performance import UI_WINDOW_HEIGHT, UI_WINDOW_WIDTH
+
+    sw, sh = get_primary_screen_size()
+    w = min(UI_WINDOW_WIDTH, sw)
+    h = min(UI_WINDOW_HEIGHT, sh - 48)
+    return max(640, w), max(480, h)
+
+
 def query_window_size(
     window_name: str,
     fallback: tuple[int, int] | None = None,
     *,
-    fullscreen: bool = True,
+    fullscreen: bool = False,
 ) -> tuple[int, int]:
     """Ukuran area tampilan jendela OpenCV."""
-    default = fallback or get_primary_screen_size()
+    default = fallback or (
+        get_primary_screen_size() if fullscreen else _default_windowed_size()
+    )
 
     try:
         rect = cv2.getWindowImageRect(window_name)
@@ -180,7 +191,7 @@ def setup_opencv_window(
     *,
     width: int | None = None,
     height: int | None = None,
-    fullscreen: bool = True,
+    fullscreen: bool = False,
 ) -> None:
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     if fullscreen:
@@ -193,8 +204,14 @@ def setup_opencv_window(
         boot = np.full((sh, sw, 3), COLOR_BG, dtype=np.uint8)
         cv2.imshow(window_name, boot)
         cv2.waitKey(1)
-    elif width is not None and height is not None:
-        cv2.resizeWindow(window_name, width, height)
+    else:
+        w, h = width or 0, height or 0
+        if w <= 0 or h <= 0:
+            w, h = _default_windowed_size()
+        cv2.resizeWindow(window_name, w, h)
+        boot = np.full((h, w, 3), COLOR_BG, dtype=np.uint8)
+        cv2.imshow(window_name, boot)
+        cv2.waitKey(1)
 
 
 def fit_frame(frame: np.ndarray | None, width: int, height: int) -> np.ndarray:
