@@ -23,10 +23,30 @@ def main() -> None:
     all_nodes = _linux_video_indices(10)
     print(f"/dev/video*     : {all_nodes}")
     print(f"device_caps sysfs: {_linux_sysfs_has_device_caps()}")
+    print("\nNama per node (sysfs):")
+    names: dict[int, str] = {}
+    for idx in all_nodes:
+        names[idx] = _linux_device_name(idx)
+        print(f"  video{idx}: {names[idx]}")
+
+    if all_nodes == [0, 1]:
+        unique = {n.lower() for n in names.values()}
+        if len(unique) == 1:
+            print(
+                "\nCatatan: video0 + video1 dengan nama sama biasanya "
+                "1 kamera USB (video1 = metadata). Colokkan kamera kedua "
+                "untuk muncul /dev/video2 (atau lebih)."
+            )
+        else:
+            print(
+                "\nCatatan: dua nama berbeda pada video0+video1 — "
+                "bisa jadi 2 kamera; uji baca frame di bawah."
+            )
+
     capture = _linux_capture_indices(10)
-    print(f"Dicoba capture  : {capture}")
+    print(f"\nDicoba capture  : {capture}")
     for idx in capture:
-        print(f"  /dev/video{idx} — {_linux_device_name(idx)}")
+        print(f"  /dev/video{idx} — {names.get(idx, _linux_device_name(idx))}")
 
     print("\n--- Uji buka + baca frame ---")
     for idx in capture:

@@ -90,11 +90,13 @@ def _linux_heuristic_capture_indices(all_indices: list[int]) -> list[int]:
         return []
 
     evens = [i for i in all_indices if i % 2 == 0]
-    # Pola klasik dua kamera: 0,1,2,3
+    # Pola klasik dua kamera: 0,1,2,3 -> capture di 0 dan 2
     if len(all_indices) >= 4 and len(evens) >= 2:
         return evens
-    if len(all_indices) == 2 and evens:
-        return evens
+    # Hanya video0 + video1: bisa 1 kamera (0=capture,1=meta) ATAU 2 kamera
+    # Harus uji keduanya — jangan hanya index genap
+    if len(all_indices) == 2:
+        return all_indices
     return all_indices
 
 
@@ -397,10 +399,17 @@ def list_available_cameras(
             f"/dev/video*: {all_nodes} | dicoba capture: {capture_nodes}"
         )
         if not _linux_sysfs_has_device_caps():
-            print(
-                "[CAMERA] Kernel tanpa device_caps — pakai index genap "
-                f"({capture_nodes}). Set .env: CAMERA_NGINTIL=0 CAMERA_BRONDOL=2"
+            hint = (
+                f"CAMERA_NGINTIL={result[0]} CAMERA_BRONDOL={result[1]}"
+                if len(result) >= 2
+                else (
+                    f"uji juga video1 — set CAMERA_BRONDOL=1 "
+                    f"(saat ini /dev/video*: {all_nodes})"
+                    if all_nodes == [0, 1]
+                    else f"set index dari {capture_nodes}"
+                )
             )
+            print(f"[CAMERA] Tanpa device_caps — {hint}")
         elif len(capture_nodes) >= 2:
             print(
                 "[CAMERA] Tip: set .env CAMERA_NGINTIL="
@@ -446,6 +455,48 @@ def _assign_by_linux_device_name(
     return ngintil_index, brondol_index
 
 
+def _pick_brondol_index(
+    available: list[int],
+    ngintil_index: int | None,
+    override: int | None,
+) -> int | None:
+    """Pilih index brondol; fallback jika .env mengarah ke /dev/video yang tidak ada."""
+    if ngintil_index is None:
+        return available[1] if len(available) >= 2 else None
+
+    if override is not None:
+        if override == ngintil_index:
+            pass
+        elif override in available:
+            return override
+        elif _device_path(override):
+            print(
+                f"[CAMERA] CAMERA_BRONDOL={override} ada di sistem tapi belum terbaca — "
+                "akan dicoba saat connect"
+            )
+            return override
+        else:
+            on_disk = _linux_video_indices(MAX_CAMERA_PROBE)
+            print(
+                f"[CAMERA] /dev/video{override} tidak ada (terdeteksi: {on_disk}). "
+                "Pakai index lain."
+            )
+
+    for idx in available:
+        if idx != ngintil_index:
+            return idx
+
+    if is_linux():
+        for idx in _linux_video_indices(MAX_CAMERA_PROBE):
+            if idx == ngintil_index:
+                continue
+            if idx in available:
+                continue
+            if probe_camera(idx):
+                return idx
+    return None
+
+
 def assign_camera_indices(
     available: list[int] | None = None,
 ) -> tuple[int | None, int | None]:
@@ -476,19 +527,27 @@ def assign_camera_indices(
     elif ngintil_index is None and available:
         ngintil_index = available[0]
 
-    if brondol_override is not None:
-        brondol_index = brondol_override
-    elif brondol_index is None and len(available) >= 2:
-        brondol_index = available[1]
+    if brondol_index is None:
+        brondol_index = _pick_brondol_index(
+            available, ngintil_index, brondol_override
+        )
+    elif (
+        brondol_override is not None
+        and brondol_index != brondol_override
+        and brondol_override not in available
+        and not _device_path(brondol_override)
+    ):
+        brondol_index = _pick_brondol_index(
+            available, ngintil_index, None
+        )
 
     if (
         ngintil_index is not None
         and brondol_index is not None
         and ngintil_index == brondol_index
     ):
-        for idx in available:
-            if idx != ngintil_index:
-                brondol_index = idx
-                break
+        brondol_index = _pick_brondol_index(
+            available, ngintil_index, None
+        )
 
     return ngintil_index, brondol_index

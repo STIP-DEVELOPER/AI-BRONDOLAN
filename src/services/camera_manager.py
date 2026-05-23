@@ -108,14 +108,18 @@ class CameraManager:
             "ngintil": True,
             "brondol": True,
         }
+        self._open_retry_after: dict[CameraRole, float] = {
+            "ngintil": 0.0,
+            "brondol": 0.0,
+        }
 
         self.refresh(force=True)
         if CAMERA_USB_BUSY or (
             get_fixed_camera_indices() and not CAMERA_HOTPLUG
         ):
             print(
-                "[CAMERA] Mode hemat USB — index dari .env, scan minimal "
-                "(Linux 2 kamera: CAMERA_NGINTIL=0 CAMERA_BRONDOL=2)"
+                "[CAMERA] Mode hemat USB — lihat .env CAMERA_NGINTIL / CAMERA_BRONDOL "
+                "(jika hanya video0+video1: gunakan 0 dan 1)"
             )
 
     def _open_capture(self, index: int) -> cv2.VideoCapture | None:
@@ -133,6 +137,39 @@ class CameraManager:
             time.sleep(0.05)
         cap.release()
         return None
+
+    def _open_capture_with_fallback(
+        self, role: CameraRole, index: int
+    ) -> cv2.VideoCapture | None:
+        cap = self._open_capture(index)
+        if cap is not None:
+            return cap
+
+        if role != "brondol" or self._caps.get("ngintil") is None:
+            if sys.platform == "darwin" or is_linux():
+                time.sleep(CAMERA_PROBE_DELAY_SEC)
+                return self._open_capture(index)
+            return None
+
+        ng_idx = self._indices.get("ngintil")
+        print(
+            "[CAMERA] BRONDOL gagal saat NGINTIL aktif — "
+            "coba urutan buka ulang (USB sibuk)...",
+            flush=True,
+        )
+        self._release_role("ngintil")
+        time.sleep(CAMERA_PROBE_DELAY_SEC)
+        cap = self._open_capture(index)
+        if cap is None:
+            return None
+        if ng_idx is not None:
+            ng_cap = self._open_capture(ng_idx)
+            if ng_cap is not None:
+                self._caps["ngintil"] = ng_cap
+                self._indices["ngintil"] = ng_idx
+            else:
+                print(f"[CAMERA] NGINTIL index {ng_idx} perlu dibuka ulang", flush=True)
+        return cap
 
     def _release_role(self, role: CameraRole) -> None:
         cap = self._caps.get(role)
@@ -175,12 +212,7 @@ class CameraManager:
             and self._caps.get(role) is not None
             and self._caps[role].isOpened()
         ]
-        fixed = get_fixed_camera_indices()
-        if fixed and (not CAMERA_HOTPLUG or CAMERA_USB_BUSY):
-            # Port USB penuh: jangan scan semua /dev/video*, pakai index .env saja
-            new_available = sorted(set(fixed) | set(held))
-        else:
-            new_available = list_available_cameras(held_indices=held)
+        new_available = list_available_cameras(held_indices=held)
         if new_available != self._available or force:
             print(f"[CAMERA] Terdeteksi index: {new_available or 'tidak ada'}")
         ng_idx, br_idx = assign_camera_indices(new_available)
@@ -217,6 +249,13 @@ class CameraManager:
             desired = target[role]
             current = self._indices.get(role)
 
+            if (
+                desired is not None
+                and now < self._open_retry_after.get(role, 0.0)
+                and self._caps.get(role) is None
+            ):
+                continue
+
             if desired is None:
                 if current is not None:
                     print(f"[CAMERA] {role.upper()}: tidak ada kamera — tunggu colokan")
@@ -236,23 +275,16 @@ class CameraManager:
             ) is not None:
                 time.sleep(CAMERA_PROBE_DELAY_SEC)
 
-            cap = self._open_capture(desired)
+            cap = self._open_capture_with_fallback(role, desired)
             if cap is not None:
                 self._caps[role] = cap
                 self._indices[role] = desired
                 path_hint = f" (/dev/video{desired})" if is_linux() else ""
                 print(f"[CAMERA] {role.upper()}: terhubung ke index {desired}{path_hint}")
+                self._open_retry_after[role] = 0.0
             else:
                 print(f"[CAMERA] {role.upper()}: gagal buka index {desired}")
-                if sys.platform == "darwin" or is_linux():
-                    time.sleep(CAMERA_PROBE_DELAY_SEC)
-                    cap = self._open_capture(desired)
-                    if cap is not None:
-                        self._caps[role] = cap
-                        self._indices[role] = desired
-                        print(
-                            f"[CAMERA] {role.upper()}: terhubung ke index {desired} (retry)"
-                        )
+                self._open_retry_after[role] = now + 45.0
 
     def is_enabled(self, role: CameraRole) -> bool:
         return self._enabled.get(role, True)
