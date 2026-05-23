@@ -1,191 +1,73 @@
-import os
-import time
-import queue
-import numpy as np
-import sounddevice as sd
-import soundfile as sf
-from openai import OpenAI
-from dotenv import load_dotenv
+import threading
 
-load_dotenv()
+import cv2
 
-# =====================
-# CONFIG
-# =====================
-SAMPLE_RATE = 16000
-CHANNELS = 1
+from src.config.performance import APP_FULLSCREEN, DISPLAY_WAIT_MS
+from src.ui.cv2_dashboard import (
+    build_voice_dashboard,
+    query_window_size,
+    setup_opencv_window,
+)
+from src.voice.agent import VoiceAgent
 
-VOICE_THRESHOLD = 0.003     # cocok mic laptop lama
-SILENCE_DURATION = 1.0     # detik diam = stop rekam
-MAX_RECORD_TIME = 10       # safety limit
+# Untuk UI terpadu (kamera + voice), jalankan: python run_ui.py
 
-AUDIO_INPUT = "input.wav"
-AUDIO_OUTPUT = "reply.wav"
+WINDOW_NAME = "SAVIRA AI — Voice"
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-audio_queue = queue.Queue()
+def main() -> None:
+    agent = VoiceAgent()
+    print("SAVIRA AI — Voice")
+    print("Tanya apa saja, atau ucapkan: MAJU / MUNDUR / KIRI / KANAN / STOP / AMBIL / CHECK")
+    if agent.serial_connected:
+        port = agent._serial.port if agent._serial else "?"
+        print(f"Serial Arduino: terhubung ({port})")
+    else:
+        print("Serial Arduino: tidak terdeteksi — colokkan USB Arduino")
+    print("ESC keluar  |  M mute  |  Klik tombol MUTE di layar\n")
 
-# =====================
-# AUDIO CALLBACK
-# =====================
-def audio_callback(indata, frames, time_info, status):
-    if status:
-        print(status)
-    audio_queue.put(indata.copy())
+    setup_opencv_window(WINDOW_NAME, fullscreen=APP_FULLSCREEN)
+    screen_w, screen_h = query_window_size(WINDOW_NAME, fullscreen=APP_FULLSCREEN)
+    mute_button_rect: list[tuple[int, int, int, int] | None] = [None]
 
-# =====================
-# RECORD WITH VAD
-# =====================
-def record_until_silence():
-    print("🎙️ Listening...")
+    def on_mouse(event, x, y, _flags, _param) -> None:
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        rect = mute_button_rect[0]
+        if rect is None:
+            return
+        x1, y1, x2, y2 = rect
+        if x1 <= x <= x2 and y1 <= y <= y2:
+            agent.toggle_mute()
 
-    frames = []
-    silence_start = None
-    start_time = time.time()
+    cv2.setMouseCallback(WINDOW_NAME, on_mouse)
 
-    with sd.InputStream(
-        samplerate=SAMPLE_RATE,
-        channels=CHANNELS,
-        callback=audio_callback,
-        dtype="float32"
-    ):
-        while True:
-            data = audio_queue.get()
-            volume = np.linalg.norm(data)
-
-            if volume > VOICE_THRESHOLD:
-                silence_start = None
-                frames.append(data)
-            else:
-                if frames:
-                    if silence_start is None:
-                        silence_start = time.time()
-                    elif time.time() - silence_start > SILENCE_DURATION:
-                        break
-
-            if time.time() - start_time > MAX_RECORD_TIME:
-                break
-
-    if not frames:
-        print("⚠️ Tidak ada suara")
-        return False
-
-    audio = np.concatenate(frames, axis=0)
-    duration = len(audio) / SAMPLE_RATE
-
-    if duration < 0.2:
-        print(f"⚠️ Audio terlalu pendek ({duration:.2f}s)")
-        return False
-
-    sf.write(AUDIO_INPUT, audio, SAMPLE_RATE, subtype="PCM_16")
-    print(f"✅ Voice captured ({duration:.2f}s)")
-    return True
-
-# =====================
-# SPEECH → TEXT
-# =====================
-def speech_to_text():
-    with open(AUDIO_INPUT, "rb") as f:
-        result = client.audio.transcriptions.create(
-            file=f,
-            model="whisper-1"
-        )
-    return result.text.strip()
-
-# =====================
-# COMMAND PARSER (FUNCTION CALLING LIGHT)
-# =====================
-def parse_command(text: str):
-    text = text.lower()
-
-    if "maju" in text or "forward" in text:
-        return "F"
-    if "mundur" in text or "backward" in text:
-        return "B"
-    if "stop" in text or "berhenti" in text:
-        return "S"
-
-    return None
-
-# =====================
-# CHAT
-# =====================
-def chat(text, messages):
-    messages.append({"role": "user", "content": text})
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        temperature=0.4
-    )
-
-    reply = response.choices[0].message.content
-    messages.append({"role": "assistant", "content": reply})
-    return reply
-
-# =====================
-# TEXT → SPEECH (HUMAN-LIKE)
-# =====================
-def text_to_speech(text):
-    response = client.audio.speech.create(
-        model="gpt-4o-mini-tts",
-        voice="alloy",   # paling natural & humble
-        input=text
-    )
-
-    with open(AUDIO_OUTPUT, "wb") as f:
-        f.write(response.read())
-
-    data, samplerate = sf.read(AUDIO_OUTPUT, dtype="float32")
-    sd.play(data, samplerate)
-    sd.wait()
-
-# =====================
-# MAIN LOOP (REALTIME)
-# =====================
-def main():
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Kamu adalah voice assistant robot yang ramah, singkat, "
-                "dan fokus pada perintah MAJU, MUNDUR, STOP."
-            )
-        }
-    ]
-
-    print("🔊 Real-time Voice Agent")
-    print("Ucapkan: MAJU / MUNDUR / STOP")
-    print("Ctrl+C untuk keluar\n")
+    voice_thread = threading.Thread(target=agent.run_loop, daemon=True)
+    voice_thread.start()
 
     try:
         while True:
-            ok = record_until_silence()
-            if not ok:
-                continue
+            screen_w, screen_h = query_window_size(
+                WINDOW_NAME, (screen_w, screen_h), fullscreen=APP_FULLSCREEN
+            )
+            canvas, mute_button_rect[0] = build_voice_dashboard(
+                agent.get_state(),
+                screen_width=screen_w,
+                screen_height=screen_h,
+            )
+            cv2.imshow(WINDOW_NAME, canvas)
 
-            text = speech_to_text()
-            if not text:
-                continue
-
-            print(f"🗣️ Kamu: {text}")
-
-            command = parse_command(text)
-            if command:
-                print(f"🛠️ COMMAND → {command}")
-                # NANTI: kirim ke Arduino via serial
-                # serial.write(command.encode())
-
-                reply = f"Perintah {text.upper()} diterima"
-            else:
-                reply = chat(text, messages)
-
-            print(f"🤖 Bot: {reply}")
-            text_to_speech(reply)
-
+            key = cv2.waitKey(DISPLAY_WAIT_MS) & 0xFF
+            if key == 27:
+                break
+            if key in (ord("m"), ord("M")):
+                agent.toggle_mute()
     except KeyboardInterrupt:
-        print("\n👋 Keluar")
+        print("\nKeluar")
+    finally:
+        agent.stop()
+        cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
