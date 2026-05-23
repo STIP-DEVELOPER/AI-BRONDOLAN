@@ -1,17 +1,21 @@
 from ultralytics import YOLO
 
+from src.config.performance import INFER_CONF, INFER_IMGSZ, INFER_IOU
+
 
 class NgintilDetector:
     def __init__(
         self,
         model_path: str,
-        conf_threshold: float = 0.5,
+        conf_threshold: float | None = None,
         left_ratio: float = 0.4,
         right_ratio: float = 0.6,
         stop_area_ratio: float = 0.35,
+        imgsz: int | None = None,
     ):
         self.model = YOLO(model_path)
-        self.conf = conf_threshold
+        self.conf = conf_threshold if conf_threshold is not None else INFER_CONF
+        self.imgsz = imgsz if imgsz is not None else INFER_IMGSZ
         self.left_ratio = left_ratio
         self.right_ratio = right_ratio
         self.stop_area_ratio = stop_area_ratio
@@ -19,14 +23,17 @@ class NgintilDetector:
     def infer(self, frame):
         return self.model(
             frame,
-            imgsz=640,
+            imgsz=self.imgsz,
             conf=self.conf,
+            iou=INFER_IOU,
+            max_det=20,
             device="cpu",
             verbose=False,
         )
 
     def get_command(self, results, frame_shape):
-        h, w = frame_shape[:2]
+        # frame_shape dari results.orig_shape (H, W) ultralytics
+        h, w = int(frame_shape[0]), int(frame_shape[1])
         frame_area = w * h
 
         # default fail-safe
