@@ -1,3 +1,4 @@
+import sys
 import time
 from typing import Literal
 
@@ -6,13 +7,16 @@ import numpy as np
 
 from src.config.performance import (
     CAMERA_HEIGHT,
+    CAMERA_PROBE_DELAY_SEC,
     CAMERA_SCAN_INTERVAL_CONNECTED_SEC,
     CAMERA_SCAN_INTERVAL_SEC,
     CAMERA_WIDTH,
 )
 from src.services.camera_autodetect import (
     assign_camera_indices,
+    is_linux,
     list_available_cameras,
+    open_video_capture,
 )
 
 CameraRole = Literal["ngintil", "brondol"]
@@ -105,23 +109,20 @@ class CameraManager:
         self.refresh(force=True)
 
     def _open_capture(self, index: int) -> cv2.VideoCapture | None:
-        import sys as _sys
-
-        backend = (
-            cv2.CAP_AVFOUNDATION if _sys.platform == "darwin" else cv2.CAP_ANY
-        )
-        cap = cv2.VideoCapture(index, backend)
+        cap = open_video_capture(index)
         if not cap.isOpened():
             cap.release()
             return None
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            cap.release()
-            return None
-        return cap
+        for _ in range(3):
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                return cap
+            time.sleep(0.05)
+        cap.release()
+        return None
 
     def _release_role(self, role: CameraRole) -> None:
         cap = self._caps.get(role)
@@ -155,7 +156,16 @@ class CameraManager:
             return
 
         self._last_scan = now
-        new_available = list_available_cameras()
+        held = [
+            idx
+            for role in self._roles
+            if (idx := self._indices.get(role)) is not None
+            and self._caps.get(role) is not None
+            and self._caps[role].isOpened()
+        ]
+        new_available = list_available_cameras(held_indices=held)
+        if new_available != self._available or force:
+            print(f"[CAMERA] Terdeteksi index: {new_available or 'tidak ada'}")
         ng_idx, br_idx = assign_camera_indices(new_available)
 
         # Mode standalone: satu role + satu kamera fisik -> pakai kamera itu
@@ -179,7 +189,9 @@ class CameraManager:
         if not changed and not force:
             return
 
-        for role in self._roles:
+        for role in ("ngintil", "brondol"):
+            if role not in self._roles:
+                continue
             if not self.is_enabled(role):
                 if self._indices.get(role) is not None:
                     self._release_role(role)
@@ -202,13 +214,28 @@ class CameraManager:
                 continue
 
             self._release_role(role)
+            if (sys.platform == "darwin" or is_linux()) and self._caps.get(
+                "ngintil"
+            ) is not None:
+                time.sleep(CAMERA_PROBE_DELAY_SEC)
+
             cap = self._open_capture(desired)
             if cap is not None:
                 self._caps[role] = cap
                 self._indices[role] = desired
-                print(f"[CAMERA] {role.upper()}: terhubung ke index {desired}")
+                path_hint = f" (/dev/video{desired})" if is_linux() else ""
+                print(f"[CAMERA] {role.upper()}: terhubung ke index {desired}{path_hint}")
             else:
                 print(f"[CAMERA] {role.upper()}: gagal buka index {desired}")
+                if sys.platform == "darwin" or is_linux():
+                    time.sleep(CAMERA_PROBE_DELAY_SEC)
+                    cap = self._open_capture(desired)
+                    if cap is not None:
+                        self._caps[role] = cap
+                        self._indices[role] = desired
+                        print(
+                            f"[CAMERA] {role.upper()}: terhubung ke index {desired} (retry)"
+                        )
 
     def is_enabled(self, role: CameraRole) -> bool:
         return self._enabled.get(role, True)
