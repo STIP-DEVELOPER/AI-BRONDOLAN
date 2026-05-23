@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import time
 from itertools import combinations
 from pathlib import Path
@@ -8,12 +9,14 @@ import cv2
 
 from src.config.performance import (
     CAMERA_HEIGHT,
+    CAMERA_OPEN_TIMEOUT_SEC,
     CAMERA_PROBE_DELAY_SEC,
     CAMERA_WIDTH,
     MAX_CAMERA_PROBE,
 )
 
 _PROBE_RETRIES = 2
+_probe_lock = threading.Lock()
 
 # V4L2 capability flags (linux/videodev2.h)
 _V4L2_CAP_VIDEO_CAPTURE = 0x00000001
@@ -185,24 +188,54 @@ def _log_linux_capture_nodes(candidates: list[int]) -> None:
     print(f"[CAMERA] Node capture V4L2: {', '.join(parts)}")
 
 
-def open_video_capture(index: int) -> cv2.VideoCapture:
-    """Buka kamera; di Linux coba index numerik lalu path /dev/videoN."""
+def _open_video_capture_impl(index: int) -> cv2.VideoCapture:
+    """Buka satu device (tanpa timeout). Linux: satu path /dev/videoN saja."""
     backend = capture_backend()
     if is_linux():
         path = _device_path(index)
-        for source in (index, path):
-            if source is None:
-                continue
-            cap = cv2.VideoCapture(source, backend)
-            if cap.isOpened():
-                return cap
-            cap.release()
-        return cv2.VideoCapture(index, backend)
+        source = path if path else index
+        return cv2.VideoCapture(source, backend)
 
     path = _device_path(index)
     if path is not None:
         return cv2.VideoCapture(path, backend)
     return cv2.VideoCapture(index, backend)
+
+
+def open_video_capture(index: int) -> cv2.VideoCapture:
+    """
+    Buka kamera. Di Linux pakai timeout agar tidak hang menit-an
+    saat USB sibuk atau device tidak bisa dibuka.
+    """
+    timeout = CAMERA_OPEN_TIMEOUT_SEC if is_linux() else 0.0
+    if timeout <= 0:
+        return _open_video_capture_impl(index)
+
+    result: list[cv2.VideoCapture] = []
+
+    def _worker() -> None:
+        with _probe_lock:
+            try:
+                result.append(_open_video_capture_impl(index))
+            except Exception:
+                result.append(cv2.VideoCapture())
+
+    label = _device_path(index) or f"index {index}"
+    print(f"[CAMERA] Membuka {label} (max {timeout:.0f}s)...", flush=True)
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        print(
+            f"[CAMERA] Timeout {label} — lewati (atur .env atau cabut colokan lain)",
+            flush=True,
+        )
+        return cv2.VideoCapture()
+
+    cap = result[0] if result else cv2.VideoCapture()
+    if cap.isOpened():
+        print(f"[CAMERA] OK: {label}", flush=True)
+    return cap
 
 
 def _read_test_frame(cap: cv2.VideoCapture) -> bool:
@@ -241,7 +274,8 @@ def probe_camera(index: int) -> bool:
     if is_linux() and not is_v4l2_capture_node(index):
         return False
 
-    for _attempt in range(_PROBE_RETRIES):
+    retries = 1 if is_linux() and CAMERA_OPEN_TIMEOUT_SEC > 0 else _PROBE_RETRIES
+    for _attempt in range(retries):
         cap = open_video_capture(index)
         try:
             if not cap.isOpened():
@@ -284,6 +318,19 @@ def _find_dual_pair(
     """Cari dua index yang bisa dibuka bersamaan."""
     found_set = set(found)
     if len(found_set) >= 2:
+        return sorted(found_set)
+
+    # Sudah satu kamera: coba pasangan sekali saja (hindari hang berulang)
+    if len(found_set) == 1 and is_linux():
+        only = next(iter(found_set))
+        pool_one = [i for i in candidates if i != only]
+        for other in pool_one:
+            print(
+                f"[CAMERA] Uji dual {only}+{other}...",
+                flush=True,
+            )
+            if _probe_pair_simultaneous(only, other):
+                return sorted({only, other})
         return sorted(found_set)
 
     # Pasangan yang sudah ketemu satu sisi
@@ -384,6 +431,21 @@ def _env_camera_index(role: str) -> int | None:
         return None
 
 
+def _assign_by_linux_device_name(
+    available: list[int],
+) -> tuple[int | None, int | None]:
+    """Cocokkan nama sysfs ke role (LUMINOUS=ngintil, 1080P=brondol)."""
+    ngintil_index: int | None = None
+    brondol_index: int | None = None
+    for idx in available:
+        name = _linux_device_name(idx).lower()
+        if any(k in name for k in ("luminous", "c50")):
+            ngintil_index = idx
+        if any(k in name for k in ("1080", "web cam", "webcam")):
+            brondol_index = idx
+    return ngintil_index, brondol_index
+
+
 def assign_camera_indices(
     available: list[int] | None = None,
 ) -> tuple[int | None, int | None]:
@@ -402,14 +464,21 @@ def assign_camera_indices(
     ngintil_index: int | None = None
     brondol_index: int | None = None
 
+    if is_linux() and not ngintil_override and not brondol_override:
+        ng_by_name, br_by_name = _assign_by_linux_device_name(available)
+        if ng_by_name is not None:
+            ngintil_index = ng_by_name
+        if br_by_name is not None:
+            brondol_index = br_by_name
+
     if ngintil_override is not None:
         ngintil_index = ngintil_override
-    elif available:
+    elif ngintil_index is None and available:
         ngintil_index = available[0]
 
     if brondol_override is not None:
         brondol_index = brondol_override
-    elif len(available) >= 2:
+    elif brondol_index is None and len(available) >= 2:
         brondol_index = available[1]
 
     if (

@@ -10,7 +10,7 @@ class BrondolDetector:
         conf_threshold: float | None = None,
         imgsz: int | None = None,
     ):
-        self.model = YOLO(model_path)
+        self.model = YOLO(model_path, task="detect")
         self.conf = conf_threshold if conf_threshold is not None else INFER_CONF
         self.imgsz = imgsz if imgsz is not None else INFER_IMGSZ
 

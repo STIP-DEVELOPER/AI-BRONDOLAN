@@ -34,10 +34,12 @@ LOG_INTERVAL_SEC = 1.0
 
 
 def main() -> None:
+    print("[START] Inisialisasi kamera...", flush=True)
+    camera = CameraManager(roles=["ngintil", "brondol"])
+    print("[START] Memuat model YOLO...", flush=True)
     ngintil_detector = NgintilDetector(MODEL_PATH_NGINTIL)
     brondol_detector = BrondolDetector(MODEL_PATH_BRONDOL)
     csv_service = DetectionCsvService(file_path="logs/detections.csv")
-    camera = CameraManager(roles=["ngintil", "brondol"])
 
     ng_runner = InferenceRunner()
     br_runner = InferenceRunner()

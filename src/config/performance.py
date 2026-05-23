@@ -57,6 +57,8 @@ CAMERA_SCAN_INTERVAL_CONNECTED_SEC = _env_float(
 )
 MAX_CAMERA_PROBE = _env_int("MAX_CAMERA_PROBE", 4)
 CAMERA_PROBE_DELAY_SEC = _env_float("CAMERA_PROBE_DELAY_SEC", _default_probe)
+# Linux: VideoCapture bisa hang menit-an jika device sibuk — batasi detik
+CAMERA_OPEN_TIMEOUT_SEC = _env_float("CAMERA_OPEN_TIMEOUT_SEC", 4.0)
 
 # Batasi kecepatan loop UI (~20 FPS tampilan)
 DISPLAY_WAIT_MS = _env_int("DISPLAY_WAIT_MS", 50)
